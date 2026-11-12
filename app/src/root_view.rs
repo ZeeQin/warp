@@ -1219,6 +1219,17 @@ fn open_new_workspace_with_workflow_open(
 
 /// Opens a new window with a file-based notebook open.
 fn open_new_with_file_notebook(arg: &PathBuf, ctx: &mut AppContext) {
+    #[cfg(feature = "local_fs")]
+    if ctx.is_gui() {
+        crate::notebooks::file::window::open(
+            arg.clone().into(),
+            None,
+            None,
+            ctx.windows().active_window(),
+            ctx,
+        );
+        return;
+    }
     open_new_with_workspace_source(
         NewWorkspaceSource::NotebookFromFilePath {
             file_path: Some(arg.to_owned()),
@@ -1288,7 +1299,10 @@ fn open_new_tab_insert_subshell_command_and_bootstrap_if_supported(
 }
 
 /// Returns the common configuration for a new "regular" window (not Quake Mode).
-fn default_window_options(window_settings: &WindowSettings, ctx: &AppContext) -> AddWindowOptions {
+pub(crate) fn default_window_options(
+    window_settings: &WindowSettings,
+    ctx: &AppContext,
+) -> AddWindowOptions {
     let (inherited_bounds, window_style) = ctx.next_window_bounds_and_style();
     let next_bounds =
         bounds_for_opening_at_custom_window_size(inherited_bounds, window_settings, ctx);
@@ -3353,6 +3367,17 @@ impl RootView {
 
     pub fn add_file_pane(&mut self, path: &PathBuf, ctx: &mut ViewContext<Self>) -> bool {
         if let AuthOnboardingState::Terminal(handle) = &self.auth_onboarding_state {
+            #[cfg(feature = "local_fs")]
+            if ctx.is_gui() {
+                crate::notebooks::file::window::open(
+                    path.clone().into(),
+                    None,
+                    None,
+                    Some(ctx.window_id()),
+                    ctx,
+                );
+                return true;
+            }
             handle.update(ctx, |workspace, ctx| {
                 workspace.add_tab_for_file_notebook(Some(path.to_owned()), ctx);
             });

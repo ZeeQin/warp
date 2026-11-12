@@ -9,6 +9,7 @@ use repo_metadata::watcher::DirectoryWatcher;
 use string_offset::CharOffset;
 use warp_core::features::FeatureFlag;
 use warp_core::ui::appearance::Appearance;
+use warp_editor::model::CoreEditorModel;
 use warp_editor::render::model::BlockItem;
 #[cfg(feature = "local_fs")]
 use warp_files::FileModel;
@@ -72,6 +73,54 @@ fn init_app(app: &mut App) {
     });
     #[cfg(feature = "voice_input")]
     app.add_singleton_model(voice_input::VoiceInput::new);
+}
+
+#[test]
+fn standalone_preview_keeps_raw_content_verbatim_and_read_only() {
+    App::test((), |mut app| async move {
+        init_app(&mut app);
+        let (_, handle) = app.add_window(WindowStyle::NotStealFocus, FileNotebookView::new);
+        handle.update(&mut app, |view, ctx| {
+            view.preview_content = Some(String::new());
+            view.open_static("Preview", "# 标题\n\n```rust\nlet x = 1;\n```\n", ctx);
+            view.handle_action(
+                &FileNotebookAction::ToggleMarkdownDisplayMode(MarkdownDisplayMode::Raw),
+                ctx,
+            );
+
+            let editor = view.editor.as_ref(ctx);
+            assert!(!editor.is_editable(ctx));
+            assert_eq!(
+                editor
+                    .model()
+                    .as_ref(ctx)
+                    .content()
+                    .as_ref(ctx)
+                    .text()
+                    .to_string(),
+                "# 标题\n\n```rust\nlet x = 1;\n```\n",
+            );
+
+            view.set_content("# Updated\n", ctx);
+            assert_eq!(
+                view.editor
+                    .as_ref(ctx)
+                    .model()
+                    .as_ref(ctx)
+                    .content()
+                    .as_ref(ctx)
+                    .text()
+                    .to_string(),
+                "# Updated\n",
+            );
+            view.handle_action(
+                &FileNotebookAction::ToggleMarkdownDisplayMode(MarkdownDisplayMode::Rendered),
+                ctx,
+            );
+            assert!(!view.editor.as_ref(ctx).is_editable(ctx));
+            assert!(view.editor.as_ref(ctx).markdown(ctx).contains("# Updated"));
+        });
+    });
 }
 
 #[test]
@@ -560,5 +609,29 @@ fn test_markdown_toggle_shortcut_follows_jupyter_notebook_rendering_flag() {
             press_shortcut(&app),
             "a rendered notebook should be toggleable from the keyboard"
         );
+    });
+}
+
+#[test]
+fn standalone_preview_waits_for_the_source_window_session() {
+    App::test((), |mut app| async move {
+        init_app(&mut app);
+        let source_window = warpui::WindowId::new();
+        let (_, handle) = app.add_window(WindowStyle::NotStealFocus, FileNotebookView::new);
+        handle.update(&mut app, |view, ctx| {
+            view.context_window_id = Some(source_window);
+            view.open(std::path::PathBuf::from("../README.md").into(), None, ctx);
+            assert!(view.location.is_none());
+        });
+        ActiveSession::handle(&app).update(&mut app, |active_session, ctx| {
+            active_session.set_session_for_test(
+                source_window,
+                Arc::new(Session::test()),
+                Some("."),
+                None,
+                ctx,
+            );
+        });
+        handle.read(&app, |view, _| assert!(view.location.is_some()));
     });
 }

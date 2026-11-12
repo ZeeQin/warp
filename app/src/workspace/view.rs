@@ -8882,6 +8882,16 @@ impl Workspace {
         code_source: Option<CodeSource>,
         ctx: &mut ViewContext<Self>,
     ) {
+        if ctx.is_gui() {
+            crate::notebooks::file::window::open(
+                path,
+                session,
+                code_source,
+                Some(ctx.window_id()),
+                ctx,
+            );
+            return;
+        }
         let existing_file_pane = {
             let pane_group = self.active_tab_pane_group();
             pane_group
@@ -8929,6 +8939,23 @@ impl Workspace {
                 });
             }
         }
+    }
+
+    #[cfg(feature = "local_fs")]
+    pub(crate) fn open_preview_in_editor(
+        &mut self,
+        path: LocalOrRemotePath,
+        source: Option<CodeSource>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.open_code(
+            source.unwrap_or(CodeSource::FileTree { location: path }),
+            EditorLayout::SplitPane,
+            None,
+            false,
+            &[],
+            ctx,
+        );
     }
 
     fn attach_path_as_context(&mut self, path: PathBuf, ctx: &mut ViewContext<Self>) {

@@ -2829,7 +2829,17 @@ pub(crate) fn app_callbacks(
             let quit_on_last_window_closed =
                 cfg!(any(target_os = "linux", target_os = "freebsd", windows))
                     || *general_settings.quit_on_last_window_closed;
-            if ctx.window_ids().count() == 1 && quit_on_last_window_closed {
+            let is_last_window = ctx.window_ids().count() == 1;
+            #[cfg(feature = "local_fs")]
+            let is_last_window = is_last_window
+                || ctx
+                    .window_ids()
+                    .filter(|id| {
+                        *id == window_id || !notebooks::file::window::is_preview_window(*id, ctx)
+                    })
+                    .count()
+                    == 1;
+            if is_last_window && quit_on_last_window_closed {
                 log::info!("No windows left, terminating app");
                 ctx.terminate_app(TerminationMode::Cancellable, None);
                 return ApproveTerminateResult::Cancel;
@@ -3005,6 +3015,10 @@ pub(crate) fn app_callbacks(
             }
 
             if let Some(window_data) = closed_window_data {
+                #[cfg(feature = "local_fs")]
+                if notebooks::file::window::handle_window_closed(window_data.window_id, ctx) {
+                    return;
+                }
                 UndoCloseStack::handle(ctx).update(ctx, |stack, ctx| {
                     stack.handle_window_closed(window_data, ctx);
                 });
