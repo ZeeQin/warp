@@ -5139,6 +5139,11 @@ impl PaneGroup {
             }
         });
 
+        if ctx.is_gui() {
+            crate::notebooks::file::window::open(path, session, source, Some(ctx.window_id()), ctx);
+            return;
+        }
+
         // Construct the pane empty, seed the restored scroll, THEN open the path — so the content
         // load that triggers `set_content` -> scroll apply can never run before the pending
         // fraction is set, even if a load were to deliver synchronously.

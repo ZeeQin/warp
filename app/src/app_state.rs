@@ -359,14 +359,7 @@ pub fn get_app_state(app: &AppContext) -> AppState {
 
     let mut windows = vec![];
 
-    for (index, window_id) in app.window_ids().enumerate() {
-        // Determine index of active window
-        if let Some(active_window_id) = active_window_id
-            && active_window_id == window_id
-        {
-            active_window_index = Some(index);
-        }
-
+    for window_id in app.window_ids() {
         if let Some(workspace) = WorkspaceRegistry::as_ref(app).get(window_id, app) {
             let ws = workspace.as_ref(app);
             // Transient drag-preview windows are not real user-visible
@@ -383,6 +376,9 @@ pub fn get_app_state(app: &AppContext) -> AppState {
                 app,
             );
             if !snapshot.tabs.is_empty() {
+                if active_window_id == Some(window_id) {
+                    active_window_index = Some(windows.len());
+                }
                 windows.push(snapshot);
             }
         }

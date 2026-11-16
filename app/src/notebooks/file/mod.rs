@@ -7,6 +7,7 @@ use pathfinder_geometry::vector::vec2f;
 use remote_server::manager::RemoteServerManager;
 use warp_core::features::FeatureFlag;
 use warp_core::ui::icons::ICON_DIMENSIONS;
+use warp_editor::content::buffer::{BufferEditAction, EditOrigin, InitialBufferState};
 use warp_editor::model::CoreEditorModel;
 #[cfg(feature = "local_fs")]
 use warp_files::{FileModel, FileModelEvent};
@@ -29,7 +30,7 @@ use warpui::ui_components::button::{ButtonVariant, TextAndIcon, TextAndIconAlign
 use warpui::ui_components::components::{UiComponent, UiComponentStyles};
 use warpui::{
     AppContext, Element, Entity, ModelHandle, SingletonEntity, TypedActionView, View, ViewContext,
-    ViewHandle,
+    ViewHandle, WindowId,
 };
 
 use super::context_menu::{ContextMenuAction, ContextMenuState, show_rich_editor_context_menu};
@@ -69,6 +70,9 @@ use crate::workflows::{WorkflowSource, WorkflowType};
 use crate::workspace::ActiveSession;
 use crate::{cmd_or_ctrl_shift, safe_warn, send_telemetry_from_ctx};
 
+#[cfg(feature = "local_fs")]
+pub(crate) mod window;
+
 /// Display mode for markdown files shown via the header segmented control.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MarkdownDisplayMode {
@@ -102,6 +106,9 @@ pub struct FileNotebookView {
     /// Vertical scroll fraction (`0..=1`) to restore once the file content is first loaded,
     /// captured before a markdown raw->rendered toggle. Consumed on the first `set_content`.
     pending_scroll_fraction: Option<f32>,
+    /// Unparsed contents retained by the independent, read-only preview window.
+    preview_content: Option<String>,
+    context_window_id: Option<WindowId>,
 }
 
 #[derive(Debug, Clone)]
@@ -228,6 +235,9 @@ pub const TOGGLE_MARKDOWN_DISPLAY_MODE_KEY_BINDING: &str = "cmdorctrl-e";
 pub fn init(app: &mut AppContext) {
     use warpui::keymap::macros::*;
 
+    #[cfg(feature = "local_fs")]
+    window::init(app);
+
     app.register_editable_bindings([
         EditableBinding::new(
             "notebookview:focus_terminal_input",
@@ -317,6 +327,8 @@ impl FileNotebookView {
             code_source: None,
             header_title_mouse_state: Default::default(),
             pending_scroll_fraction: None,
+            preview_content: None,
+            context_window_id: None,
         }
     }
 
@@ -372,12 +384,34 @@ impl FileNotebookView {
     ///
     /// Jupyter notebook rendering stays behind a feature flag until it launches.
     pub fn set_content(&mut self, content: &str, ctx: &mut ViewContext<Self>) {
+        if let Some(preview_content) = &mut self.preview_content {
+            content.clone_into(preview_content);
+        }
         let doc_path = self.file_state.local_path().map(|p| p.to_path_buf());
         let render_as_ipynb =
             FeatureFlag::JupyterNotebookRendering.is_enabled() && self.is_jupyter_notebook_file();
         let scroll_fraction = self.pending_scroll_fraction.take();
         self.editor.update(ctx, |editor, ctx| {
-            if render_as_ipynb {
+            if self.preview_content.is_some()
+                && self.markdown_display_mode == MarkdownDisplayMode::Raw
+            {
+                editor.model().update(ctx, |model, ctx| {
+                    model.update_content(
+                        |mut content_buffer, ctx| {
+                            content_buffer.buffer().reset_undo_stack();
+                            content_buffer.apply_edit(
+                                BufferEditAction::ReplaceWith(InitialBufferState::plain_text(
+                                    content,
+                                )),
+                                EditOrigin::SystemEdit,
+                                model.buffer_selection_model().clone(),
+                                ctx,
+                            );
+                        },
+                        ctx,
+                    );
+                });
+            } else if render_as_ipynb {
                 editor.reset_with_ipynb(content, ctx);
             } else {
                 editor.reset_with_markdown(content, ctx);
@@ -448,7 +482,7 @@ impl FileNotebookView {
             LocalOrRemotePath::Local(local_path) => {
                 let session = session.or_else(|| {
                     ActiveSession::as_ref(ctx)
-                        .session(ctx.window_id())
+                        .session(self.context_window_id.unwrap_or(ctx.window_id()))
                         .filter(|s| s.is_local())
                 });
                 self.open_local(local_path, session, ctx);
@@ -871,7 +905,9 @@ impl FileNotebookView {
             let Some(path) = self.local_path() else {
                 return;
             };
-            if let Some(active_session) = handle.as_ref(ctx).session(ctx.window_id())
+            if let Some(active_session) = handle
+                .as_ref(ctx)
+                .session(self.context_window_id.unwrap_or(ctx.window_id()))
                 && active_session.is_local()
             {
                 self.set_context(&path, active_session, ctx);
@@ -1035,10 +1071,19 @@ impl View for FileNotebookView {
 
     fn keymap_context(&self, _app: &AppContext) -> warpui::keymap::Context {
         let mut context = Self::default_keymap_context();
-        if self.shows_markdown_toggle() {
+        if self.shows_markdown_toggle() && self.preview_content.is_none() {
             context.set.insert(MARKDOWN_DISPLAY_MODE_TOGGLE_CONTEXT);
         }
         context
+    }
+
+    fn on_window_closed(&mut self, ctx: &mut ViewContext<Self>) {
+        #[cfg(feature = "local_fs")]
+        if self.preview_content.is_some() {
+            self.release_file_model(ctx);
+        }
+        #[cfg(not(feature = "local_fs"))]
+        let _ = ctx;
     }
 
     fn accessibility_contents(&self, _ctx: &AppContext) -> Option<AccessibilityContent> {
@@ -1112,7 +1157,12 @@ impl TypedActionView for FileNotebookView {
                     use crate::util::file::external_editor::EditorSettings;
                     use crate::util::openable_file_type::resolve_file_target;
                     let settings = EditorSettings::as_ref(ctx);
-                    let target = resolve_file_target(&local_path, settings, None);
+                    let target = match resolve_file_target(&local_path, settings, None) {
+                        FileTarget::MarkdownViewer(layout) if self.preview_content.is_some() => {
+                            FileTarget::CodeEditor(layout)
+                        }
+                        target => target,
+                    };
                     ctx.emit(FileNotebookEvent::OpenFileWithTarget {
                         path: local_path,
                         target,
@@ -1145,6 +1195,13 @@ impl TypedActionView for FileNotebookView {
                     .update(ctx, |control, ctx| {
                         control.set_selected_mode(*mode, ctx);
                     });
+
+                if let Some(content) = self.preview_content.clone() {
+                    self.pending_scroll_fraction = self.scroll_fraction(ctx);
+                    self.set_content(&content, ctx);
+                    ctx.notify();
+                    return;
+                }
 
                 match mode {
                     MarkdownDisplayMode::Rendered => {
@@ -1200,11 +1257,15 @@ impl BackingView for FileNotebookView {
             .focus_handle
             .as_ref()
             .is_some_and(|h| h.is_maximized(ctx));
-        let mut actions = vec![
-            MenuItemFields::toggle_pane_action(is_maximized)
-                .with_on_select_action(FileNotebookAction::ToggleMaximized)
-                .into_item(),
-        ];
+        let mut actions = if self.preview_content.is_some() {
+            Vec::new()
+        } else {
+            vec![
+                MenuItemFields::toggle_pane_action(is_maximized)
+                    .with_on_select_action(FileNotebookAction::ToggleMaximized)
+                    .into_item(),
+            ]
+        };
 
         if let Some(SourceFile::FileBased { .. }) = self.file_state.source() {
             actions.push(MenuItem::Separator);
